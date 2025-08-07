@@ -62,7 +62,7 @@ class ClusterCovariateMLP(BaseMLP):
     
 
 class MLPActivations(tkl.Layer):
-    def __init__(self, last_activation: str='sigmoid', name: str='mlp_activations', **kwargs):
+    def __init__(self, last_activation: str='linear', name: str='mlp_activations', **kwargs):
         """Basic MLP with 3 hidden layers of 4 neurons each. In addition to the
         prediction, also returns the activation of each layer. Intended to be
         used within a domain adversarial model.
@@ -74,14 +74,24 @@ class MLPActivations(tkl.Layer):
         """        
         super(MLPActivations, self).__init__(name=name, **kwargs)
 
-        self.dense0 = tkl.Dense(4, activation='relu', name=name + '_dense0')
-        self.dense1 = tkl.Dense(4, activation='relu', name=name + '_dense1')
-        self.dense2 = tkl.Dense(4, activation='relu', name=name + '_dense2')
+                #归一化层
+        self.norm = tkl.LayerNormalization(name=name + '_norm')
+
+        # dense: 线性层（全连接层）
+        # 基础结构 
+        self.dense0 = tkl.Dense(128, activation='relu', name=name + '_dense0')
+        self.dense1 = tkl.Dense(64, activation='relu', name=name + '_dense1')
+        self.dense2 = tkl.Dense(32, activation='relu', name=name + '_dense2')
+        # ** NEW **
+        # 更改为线性输出 以 适配回归任务
         self.dense_out = tkl.Dense(1, activation=last_activation, name=name + '_dense_out')
         
-    def call(self, inputs):
+
         
-        x0 = self.dense0(inputs)
+    def call(self, inputs):
+
+        x = self.norm(inputs)
+        x0 = self.dense0(x)
         x1 = self.dense1(x0)
         x2 = self.dense2(x1)
         out = self.dense_out(x2)
@@ -163,7 +173,7 @@ class DomainAdversarialMLP(tf.keras.Model):
         super(DomainAdversarialMLP, self).__init__(name=name, **kwargs)
 
         # 网络 1： MLP Activations
-        self.classifier = MLPActivations(name='mlp')
+        self.predictor = MLPActivations(name='mlp')
         # 网络 2： Adversary
         self.adversary = Adversary(n_clusters=n_clusters, 
                                    layer_units=adversary_layer_units,
@@ -177,21 +187,21 @@ class DomainAdversarialMLP(tf.keras.Model):
         # 先用 fixed effect 网络对输入值进行前向传播
         # 返回一个 列表 classifier_outs， 包含每一层的输出值
         # Eg: classifier_outs = [hidden1, hidden2, hidden3, output]
-        classifier_outs = self.classifier(x)
+        classifier_outs = self.predictor(x)
         
         # 取最后一层输出做pred_class，也就是预测结果 h hat
-        pred_class = classifier_outs[-1] 
+        pred_value = classifier_outs[-1] 
         
         # 取出前三层的输出值输出给对抗网络
         activations = tf.concat(classifier_outs[:3], axis=1) 
         pred_cluster = self.adversary(activations)
         
-        return pred_class, pred_cluster
+        return pred_value, pred_cluster
     
     def compile(self,
-                loss_class=tf.keras.losses.BinaryCrossentropy(), # fixed effect：主分类任务，一个适用于二分类任务的损失函数
+                loss_class=tf.keras.losses.MeanSquaredError(), # fixed effect：主预测任务，一个适用于预测任务的损失函数
                 loss_adv=tf.keras.losses.CategoricalCrossentropy(), # random effect： 对抗网络部分的损失函数
-                metric_class=tf.keras.metrics.AUC(curve='PR', name='auprc'), # 评估指标部分 
+                metric_class=tf.keras.metrics.MeanAbsoluteError(name='mae'), # 评估指标部分 
                 metric_adv=tf.keras.metrics.CategoricalAccuracy(name='acc'),
                 opt_main=tf.keras.optimizers.Adam(lr=0.001), # 优化器部分
                 opt_adversary=tf.keras.optimizers.Adam(lr=0.001),
@@ -265,7 +275,7 @@ class DomainAdversarialMLP(tf.keras.Model):
         # *这一层的逻辑：fixed effect中可能使用了mixed effect的信息作为特征提取，每层输出可能都带有相关的内容
         # *于是我们将隐藏层的输出提供给 adversary 网络， 让它从相关特征信息中预测 cluster   
         
-        activations = tf.concat(self.classifier(data)[:-1], axis=1)
+        activations = tf.concat(self.predictor(data)[:-1], axis=1)
         # 得到当前 fixed effect classifier 的除去最后一层的数据
         # x0, x1, x2, out = dense0 → dense1 → dense2 → dense_out
         # 这里也就是提取隐藏层的输出 x0, x1, x2 
@@ -306,8 +316,8 @@ class DomainAdversarialMLP(tf.keras.Model):
                 - (self.loss_gen_weight * loss_adv)
     
         # 梯度更新
-        grads_class = gt2.gradient(total_loss, self.classifier.trainable_variables)
-        self.opt_main.apply_gradients(zip(grads_class, self.classifier.trainable_variables))
+        grads_class = gt2.gradient(total_loss, self.predictor.trainable_variables)
+        self.opt_main.apply_gradients(zip(grads_class, self.predictor.trainable_variables))
         
 
         self.metric_class.update_state(labels, pred_class)
@@ -316,6 +326,11 @@ class DomainAdversarialMLP(tf.keras.Model):
         
         return {m.name: m.result() for m in self.metrics}
     
+
+
+
+
+
     def test_step(self, data):
         (data, clusters), labels = data
                         

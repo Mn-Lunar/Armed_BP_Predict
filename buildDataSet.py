@@ -23,6 +23,10 @@ class SignalDatasetProcessing:
 
             # Load and preprocess data
             self._load_mat()
+
+
+            # 当使用cluster 信息时: ((signals, demographics), labels)
+            # 不使用cluster 信息时： (signals, labels)
             self.dataset = self._to_tf_dataset()
             print("Finished data database building.")
 
@@ -76,7 +80,9 @@ class SignalDatasetProcessing:
             Gender = (Gender == 'M').astype(float)
             Height = Subset['Height'][:num_training_samples]
             Weight = Subset['Weight'][:num_training_samples]
-            Demographics = np.stack((Age, Gender, Height, Weight), axis=1).astype(np.float32)
+            SubjectID = Subset['SubjectID '][:num_training_samples]
+            Demographics = np.stack((Age, Gender, Height, Weight, SubjectID), axis=1).astype(np.float32)
+            print("第一组 Demographics 向量:", Demographics[0])
             self.Inputs = (self.Signals, Demographics)
             print(f"Demographics shape: {Demographics.shape}")
         else:
